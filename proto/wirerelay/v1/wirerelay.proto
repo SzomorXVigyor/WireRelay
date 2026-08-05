@@ -1,0 +1,74 @@
+syntax = "proto3";
+
+package wirerelay.v1;
+
+option go_package = "wirerelay/v1;wirerelayv1";
+
+// WireRelayService provides health monitoring and network tunnel relaying over WireGuard.
+service WireRelayService {
+  // GetHealth returns current WireGuard interface health and handshake metrics.
+  rpc GetHealth (HealthRequest) returns (HealthResponse);
+
+  // PingTarget executes a TCP or ICMP connection probe to a target host inside the site network.
+  rpc PingTarget (PingRequest) returns (PingResponse);
+
+  // TunnelStream establishes a full-duplex, bidirectional byte stream to a target host over WireGuard.
+  rpc TunnelStream (stream TunnelFrame) returns (stream TunnelFrame);
+}
+
+message HealthRequest {
+  string interface = 1; // Optional: Default is "wg0"
+}
+
+enum TunnelStatus {
+  TUNNEL_STATUS_UNSPECIFIED = 0;
+  TUNNEL_STATUS_CONNECTED = 1;     // Handshake <= 180s
+  TUNNEL_STATUS_DEGRADED = 2;      // 180s < Handshake <= 300s
+  TUNNEL_STATUS_DISCONNECTED = 3;  // Handshake > 300s or inactive
+}
+
+message HealthResponse {
+  string interface = 1;
+  TunnelStatus status = 2;
+  int64 handshake_age_seconds = 3;
+  int64 timestamp = 4;
+}
+
+message PingRequest {
+  string target_host = 1; // IPv4, IPv6, or Domain Name
+  uint32 target_port = 2; // Target port for TCP probe
+  uint32 timeout_ms = 3;  // Timeout in milliseconds (default: 2000ms)
+}
+
+message PingResponse {
+  bool reachable = 1;
+  uint32 latency_ms = 2;
+  string error_message = 3;
+}
+
+enum TransportProtocol {
+  TRANSPORT_PROTOCOL_UNSPECIFIED = 0;
+  TRANSPORT_PROTOCOL_TCP = 1;
+  TRANSPORT_PROTOCOL_UDP = 2;
+}
+
+message TunnelHeader {
+  string target_host = 1;           // IPv4, IPv6, or Domain Name
+  uint32 target_port = 2;           // Destination Port
+  TransportProtocol protocol = 3;   // TCP or UDP
+  uint32 timeout_ms = 4;            // Custom dial timeout in ms (default: 5000ms)
+}
+
+message TunnelAck {
+  bool success = 1;
+  string error_message = 2;
+  string local_bound_address = 3;
+}
+
+message TunnelFrame {
+  oneof frame {
+    TunnelHeader header = 1; // Sent in the FIRST message from client
+    TunnelAck ack = 2;       // Sent in the FIRST response from WireRelay server
+    bytes payload = 3;       // Subsequent full-duplex stream payload bytes
+  }
+}

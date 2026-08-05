@@ -1,0 +1,42 @@
+services:
+  wirerelay:
+    build:
+      context: .
+      target: wirerelay
+    container_name: wirerelay-daemon
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - WIRERELAY_IFACE=${WIRERELAY_IFACE:-wg0}
+      - WIRERELAY_GRPC_PORT=${WIRERELAY_GRPC_PORT:-9000}
+      - WIRERELAY_HTTP_PORT=${WIRERELAY_HTTP_PORT:-8080}
+      - WIREGUARD_CONF_STR=${WIREGUARD_CONF_STR:-}
+      - DISABLE_IPV6=${DISABLE_IPV6:-false}
+    ports:
+      - "8080:8080"
+      - "9000:9000"
+#    networks:
+#      - wirerelay-net
+#
+# Use this to test the bridge via a UI configurator
+#  wirerelay-testbridge:
+#    build:
+#      context: .
+#      target: wirerelay-testbridge
+#    container_name: wirerelay-bridge-tester
+#    environment:
+#      - BRIDGE_HTTP_PORT=${BRIDGE_HTTP_PORT:-8090}
+#      - WIRERELAY_ADDR=${WIRERELAY_ADDR:-wirerelay:9000}
+#    ports:
+#      - "8090:8090"
+#      # Expose bridge listener ports to host (e.g., Modbus 502)
+#      - "502:502"
+#      - "503:503"
+#    networks:
+#      - wirerelay-net
+#    depends_on:
+#      - wirerelay
+
+#networks:
+#  wirerelay-net:
+#    driver: bridge
