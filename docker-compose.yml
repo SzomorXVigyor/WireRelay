@@ -1,8 +1,6 @@
 services:
   wirerelay:
-    build:
-      context: .
-      target: wirerelay
+    image: ghcr.io/szomorxvigyor/wirerelay:latest
     container_name: wirerelay-daemon
     cap_add:
       - NET_ADMIN
