@@ -194,3 +194,11 @@ message TunnelFrame {
 * `TUNNEL_STATUS_DISCONNECTED`: Age $> 300 \text{ seconds}$ or interface down (REST returns `503 Service Unavailable`).
 
 ```
+
+## Release
+
+Releases are tagged from the `main` branch and auto published on Github Registry as Docker images. To create a new release:
+
+1. Commit the change and push to `main`.
+2. Create a new tag matching the version (e.g. `git tag v1.0.0`).
+3. Push the tag to trigger the release workflow (e.g. `git push origin v1.0.0`).
