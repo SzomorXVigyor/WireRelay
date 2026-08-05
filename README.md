@@ -193,8 +193,6 @@ message TunnelFrame {
 * `TUNNEL_STATUS_DEGRADED`: $180 \text{ seconds} < \text{Age} \le 300 \text{ seconds}$.
 * `TUNNEL_STATUS_DISCONNECTED`: Age $> 300 \text{ seconds}$ or interface down (REST returns `503 Service Unavailable`).
 
-```
-
 ## Release
 
 Releases are tagged from the `main` branch and auto published on Github Registry as Docker images. To create a new release:
