@@ -28,8 +28,12 @@ iptables -P FORWARD DROP >/dev/null 2>&1 || true
 # 3. Bring up WireGuard interface if config exists
 WG_UP=0
 if [ -f "$RUN_CONFIG" ]; then
-    # Strip DNS directives to prevent resolvconf errors inside Docker
-    sed -i '/^[[:space:]]*DNS[[:space:]]*=/Id' "$RUN_CONFIG"
+    # Preserve original config (with DDNS hostnames) for the periodic DDNS watcher
+    cp "$RUN_CONFIG" "${RUN_CONFIG}.orig"
+    chmod 600 "${RUN_CONFIG}.orig"
+
+    # Strip DNS directives to prevent resolvconf errors inside Docker (BusyBox-safe)
+    sed -i '/^[[:space:]]*[Dd][Nn][Ss][[:space:]]*=/d' "$RUN_CONFIG"
 
     # Strip IPv6 addresses/routes if DISABLE_IPV6 or WIREGUARD_DISABLE_IPV6 is set to true/1
     if [ "$DISABLE_IPV6" = "true" ] || [ "$DISABLE_IPV6" = "1" ] || \
@@ -63,6 +67,28 @@ if [ -f "$RUN_CONFIG" ]; then
         }
         ' "$RUN_CONFIG" > "${RUN_CONFIG}.tmp" && mv "${RUN_CONFIG}.tmp" "$RUN_CONFIG"
         chmod 600 "$RUN_CONFIG"
+
+        # Pre-resolve hostname Endpoints to IPv4 (A record only) so Alpine/musl wg does not
+        # fail with EAI_AGAIN when upstream DNS returns SERVFAIL on AAAA queries.
+        EP_LINE="$(grep -i '^[[:space:]]*Endpoint[[:space:]]*=' "$RUN_CONFIG" | head -n 1 || true)"
+        if [ -n "$EP_LINE" ]; then
+            EP_VAL="$(printf "%s" "$EP_LINE" | cut -d'=' -f2- | tr -d ' \t\r')"
+            EP_HOST="${EP_VAL%:*}"
+            EP_PORT="${EP_VAL##*:}"
+            case "$EP_HOST" in
+                *[!0-9.]*)
+                    RESOLVED_IP="$(/usr/local/bin/wirerelay -resolve-v4 "$EP_HOST" 2>/dev/null || true)"
+                    if [ -n "$RESOLVED_IP" ]; then
+                        echo "[entrypoint] Resolved IPv4 endpoint ${EP_HOST} -> ${RESOLVED_IP}:${EP_PORT}"
+                        awk -v target="${RESOLVED_IP}:${EP_PORT}" '
+                        tolower($0) ~ /^[ \t]*endpoint[ \t]*=/ { print "Endpoint = " target; next }
+                        { print }
+                        ' "$RUN_CONFIG" > "${RUN_CONFIG}.tmp" && mv "${RUN_CONFIG}.tmp" "$RUN_CONFIG"
+                        chmod 600 "$RUN_CONFIG"
+                    fi
+                    ;;
+            esac
+        fi
     fi
 
     echo "[entrypoint] Initializing WireGuard interface ${IFACE} using ${RUN_CONFIG}..."

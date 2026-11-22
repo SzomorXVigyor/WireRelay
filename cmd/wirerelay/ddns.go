@@ -75,8 +75,9 @@ func parsePeerEndpoints(confContent string) []peerEndpointConfig {
 
 func resolveConfigPath(iface string) string {
 	candidates := []string{
-		filepath.Join("/run/wireguard", iface+".conf"),
+		filepath.Join("/run/wireguard", iface+".conf.orig"),
 		filepath.Join("/etc/wireguard", iface+".conf"),
+		filepath.Join("/run/wireguard", iface+".conf"),
 	}
 	for _, p := range candidates {
 		if _, err := os.Stat(p); err == nil {

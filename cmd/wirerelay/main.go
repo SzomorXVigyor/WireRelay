@@ -68,10 +68,23 @@ func main() {
 		}
 	}
 
+	resolveV4 := ""
 	flag.StringVar(&iface, "iface", iface, "WireGuard interface name")
 	flag.StringVar(&grpcPort, "grpc-port", grpcPort, "gRPC Server Port")
 	flag.StringVar(&httpPort, "http-port", httpPort, "REST Health HTTP Port")
+	flag.StringVar(&resolveV4, "resolve-v4", "", "Resolve a hostname to IPv4 (A record only) and exit")
 	flag.Parse()
+
+	if resolveV4 != "" {
+		rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer rcancel()
+		ips, err := net.DefaultResolver.LookupIP(rctx, "ip4", resolveV4)
+		if err != nil || len(ips) == 0 {
+			log.Fatalf("[WireRelay] resolve-v4 failed for %s: %v", resolveV4, err)
+		}
+		_, _ = os.Stdout.WriteString(ips[0].String() + "\n")
+		return
+	}
 
 	log.Printf("[WireRelay] Starting daemon (Interface: %s, gRPC: :%s, REST: :%s, MaxStreams: %d, Auth: %v)",
 		iface, grpcPort, httpPort, maxStreams, authToken != "")
