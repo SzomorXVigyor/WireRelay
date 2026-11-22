@@ -23,8 +23,11 @@ It enables microservices to dynamically reach devices inside isolated edge subne
 | `WIRERELAY_IFACE` | `wg0` | Target WireGuard interface to monitor and route over. |
 | `WIRERELAY_GRPC_PORT` | `9000` | Port for the gRPC Tunnel Relay & API. |
 | `WIRERELAY_HTTP_PORT` | `8080` | Port for the REST Health Check JSON API. |
-| `WIREGUARD_CONF_STR` | `""` | Raw WireGuard `.conf` string payload (written to `/etc/wireguard/wg0.conf` on startup if present). |
+| `WIREGUARD_CONF_STR` | `""` | Raw WireGuard `.conf` string payload (written to `/run/wireguard/<iface>.conf` on startup if present). |
 | `DISABLE_IPV6` | `false` | When `true` or `1`, strips all IPv6 addresses and routes from `Address` and `AllowedIPs`. |
+| `WIRERELAY_AUTH_TOKEN` | `""` | Optional bearer token enforced on all gRPC calls (`authorization: Bearer <token>` or `x-wirerelay-token`). |
+| `WIRERELAY_MAX_CONCURRENT_STREAMS` | `256` | Maximum concurrent `TunnelStream` RPCs allowed by the relay. |
+| `WIRERELAY_DNS_RESOLVE_INTERVAL` | `60s` | Periodic DDNS endpoint re-resolution interval (`0` disables). |
 
 ---
 

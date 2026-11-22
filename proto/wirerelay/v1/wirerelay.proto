@@ -9,7 +9,7 @@ service WireRelayService {
   // GetHealth returns current WireGuard interface health and handshake metrics.
   rpc GetHealth (HealthRequest) returns (HealthResponse);
 
-  // PingTarget executes a TCP or ICMP connection probe to a target host inside the site network.
+  // PingTarget executes a TCP reachability probe to a target host inside the site network.
   rpc PingTarget (PingRequest) returns (PingResponse);
 
   // TunnelStream establishes a full-duplex, bidirectional byte stream to a target host over WireGuard.
@@ -17,21 +17,41 @@ service WireRelayService {
 }
 
 message HealthRequest {
-  string interface = 1; // Optional: Default is "wg0"
+  string interface = 1; // Optional: Default is WIRERELAY_IFACE ("wg0")
 }
 
 enum TunnelStatus {
   TUNNEL_STATUS_UNSPECIFIED = 0;
-  TUNNEL_STATUS_CONNECTED = 1;     // Handshake <= 180s
-  TUNNEL_STATUS_DEGRADED = 2;      // 180s < Handshake <= 300s
-  TUNNEL_STATUS_DISCONNECTED = 3;  // Handshake > 300s or inactive
+  TUNNEL_STATUS_CONNECTED = 1;     // All peers handshaked <= 180s
+  TUNNEL_STATUS_DEGRADED = 2;      // Worst peer 180s < Handshake <= 300s
+  TUNNEL_STATUS_DISCONNECTED = 3;  // Any peer > 300s, never handshaked, or interface error
+}
+
+// HandshakeState distinguishes configuration errors (never handshaked), interface errors,
+// and previously-connected tunnels whose handshake has gone stale.
+enum HandshakeState {
+  HANDSHAKE_STATE_UNSPECIFIED = 0;
+  HANDSHAKE_STATE_CONNECTED = 1;        // Handshake <= 180s
+  HANDSHAKE_STATE_DEGRADED = 2;         // 180s < Handshake <= 300s
+  HANDSHAKE_STATE_STALE = 3;            // Previously handshaked, now > 300s
+  HANDSHAKE_STATE_NEVER_HANDSHAKED = 4; // Interface up, peer timestamp == 0 (or no peers)
+  HANDSHAKE_STATE_INTERFACE_ERROR = 5;  // wg show failed / interface missing
+}
+
+message PeerHealth {
+  string public_key = 1;
+  int64 handshake_age_seconds = 2; // -1 if never handshaked
+  HandshakeState state = 3;
 }
 
 message HealthResponse {
   string interface = 1;
   TunnelStatus status = 2;
-  int64 handshake_age_seconds = 3;
+  int64 handshake_age_seconds = 3; // Worst peer age; -1 if never handshaked or interface error
   int64 timestamp = 4;
+  HandshakeState handshake_state = 5;
+  string error_message = 6;
+  repeated PeerHealth peers = 7;
 }
 
 message PingRequest {
@@ -65,10 +85,19 @@ message TunnelAck {
   string local_bound_address = 3;
 }
 
+// TunnelClose signals graceful or remote-initiated stream termination (e.g. target EOF).
+message TunnelClose {
+  string reason = 1;
+}
+
 message TunnelFrame {
   oneof frame {
     TunnelHeader header = 1; // Sent in the FIRST message from client
     TunnelAck ack = 2;       // Sent in the FIRST response from WireRelay server
-    bytes payload = 3;       // Subsequent full-duplex stream payload bytes
+    // Subsequent full-duplex stream payload bytes.
+    // UDP contract: each payload frame maps 1:1 to a single UDP datagram on the wire.
+    // Callers MUST send one complete datagram per payload frame for UDP targets.
+    bytes payload = 3;
+    TunnelClose close = 4;   // Signals explicit half-close / remote EOF
   }
 }

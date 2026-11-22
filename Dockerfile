@@ -28,6 +28,9 @@ RUN protoc --go_out=. --go_opt=paths=source_relative \
 # Populate go.sum and resolve all gRPC dependency entries automatically
 RUN go mod tidy
 
+# Run unit & integration tests before compiling binaries
+RUN go test -v ./...
+
 # Compile statically linked Linux binary
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /bin/wirerelay ./cmd/wirerelay
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /bin/wirerelay-testbridge ./cmd/wirerelay-testbridge

@@ -18,6 +18,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 
 	pb "SzomorXVigyor/WireRelay/proto/wirerelay/v1"
 )
@@ -252,7 +253,11 @@ func (b *Bridge) tunnelTCPClient(clientConn net.Conn) {
 	defer grpcConn.Close()
 
 	client := pb.NewWireRelayServiceClient(grpcConn)
-	stream, err := client.TunnelStream(context.Background())
+	streamCtx := context.Background()
+	if tok := os.Getenv("WIRERELAY_AUTH_TOKEN"); tok != "" {
+		streamCtx = metadata.NewOutgoingContext(streamCtx, metadata.Pairs("authorization", "Bearer "+tok))
+	}
+	stream, err := client.TunnelStream(streamCtx)
 	if err != nil {
 		log.Printf("[Bridge TCP Error] TunnelStream failed: %v", err)
 		return
@@ -301,9 +306,10 @@ func (b *Bridge) tunnelTCPClient(clientConn net.Conn) {
 
 	go func() {
 		defer wg.Done()
+		defer clientConn.Close()
 		for {
 			frame, err := stream.Recv()
-			if err != nil {
+			if err != nil || frame.GetClose() != nil {
 				return
 			}
 			payload := frame.GetPayload()
@@ -399,7 +405,11 @@ func (b *Bridge) createUDPSession(clientAddr *net.UDPAddr) (*udpSession, error) 
 	}
 
 	client := pb.NewWireRelayServiceClient(grpcConn)
-	stream, err := client.TunnelStream(context.Background())
+	streamCtx := context.Background()
+	if tok := os.Getenv("WIRERELAY_AUTH_TOKEN"); tok != "" {
+		streamCtx = metadata.NewOutgoingContext(streamCtx, metadata.Pairs("authorization", "Bearer "+tok))
+	}
+	stream, err := client.TunnelStream(streamCtx)
 	if err != nil {
 		grpcConn.Close()
 		return nil, err
