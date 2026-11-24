@@ -36,9 +36,23 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /bin/wirerelay ./cmd/w
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /bin/wirerelay-testbridge ./cmd/wirerelay-testbridge
 
 # ==========================================
-# Stage 2 - Target 1: WireRelay Core Image
+# Stage 2 - Optional Target: WireRelay Bridge Tester Image
+# Build with: docker build --target wirerelay-testbridge .
 # ==========================================
-FROM alpine:latest AS wirerelay
+FROM alpine:3.23 AS wirerelay-testbridge
+
+RUN apk add --no-cache ca-certificates
+
+COPY --from=builder /bin/wirerelay-testbridge /usr/local/bin/wirerelay-testbridge
+
+EXPOSE 8090
+
+ENTRYPOINT ["/usr/local/bin/wirerelay-testbridge"]
+
+# ==========================================
+# Stage 3 - Default Target: WireRelay Core Image
+# ==========================================
+FROM alpine:3.23 AS wirerelay
 
 RUN apk add --no-cache wireguard-tools iproute2 iptables ca-certificates
 
@@ -49,16 +63,3 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 EXPOSE 8080 9000
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-
-# ==========================================
-# Stage 2 - Target 2: WireRelay Bridge Tester Image
-# ==========================================
-FROM alpine:latest AS wirerelay-testbridge
-
-RUN apk add --no-cache ca-certificates
-
-COPY --from=builder /bin/wirerelay-testbridge /usr/local/bin/wirerelay-testbridge
-
-EXPOSE 8090
-
-ENTRYPOINT ["/usr/local/bin/wirerelay-testbridge"]
