@@ -14,6 +14,22 @@ service WireRelayService {
 
   // TunnelStream establishes a full-duplex, bidirectional byte stream to a target host over WireGuard.
   rpc TunnelStream (stream TunnelFrame) returns (stream TunnelFrame);
+
+  // Configure pushes a WireGuard configuration over authenticated gRPC at startup.
+  // The config is applied in-memory / container-private tmpfs and immediately shredded.
+  rpc Configure (ConfigureRequest) returns (ConfigureResponse);
+}
+
+message ConfigureRequest {
+  string interface = 1;  // Optional: defaults to WIRERELAY_IFACE ("wg0")
+  string config = 2;     // Required: raw WireGuard .conf payload
+  bool disable_ipv6 = 3; // Optional: strip IPv6 addresses/routes and force IPv4 endpoint resolution
+}
+
+message ConfigureResponse {
+  bool applied = 1;
+  string interface = 2;
+  string error_message = 3;
 }
 
 message HealthRequest {
@@ -52,6 +68,7 @@ message HealthResponse {
   HandshakeState handshake_state = 5;
   string error_message = 6;
   repeated PeerHealth peers = 7;
+  bool configured = 8;             // True once WireGuard interface has been configured
 }
 
 message PingRequest {

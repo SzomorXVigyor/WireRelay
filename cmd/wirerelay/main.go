@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"io"
 	"log"
@@ -34,9 +35,10 @@ type server struct {
 	iface       string
 	shutdownCtx context.Context
 	streamSem   chan struct{}
+	cfgMgr      *configManager
 }
 
-func newRelayServer(shutdownCtx context.Context, iface string, maxStreams int) *server {
+func newRelayServer(shutdownCtx context.Context, iface string, maxStreams int, cfgMgr *configManager) *server {
 	if maxStreams < 1 {
 		maxStreams = defaultMaxConcurrentStreams
 	}
@@ -44,6 +46,7 @@ func newRelayServer(shutdownCtx context.Context, iface string, maxStreams int) *
 		iface:       iface,
 		shutdownCtx: shutdownCtx,
 		streamSem:   make(chan struct{}, maxStreams),
+		cfgMgr:      cfgMgr,
 	}
 }
 
@@ -53,6 +56,7 @@ func main() {
 	httpPort := getEnv("WIRERELAY_HTTP_PORT", "8080")
 	authToken := os.Getenv("WIRERELAY_AUTH_TOKEN")
 	disableIPv6 := isTruthy(os.Getenv("DISABLE_IPV6")) || isTruthy(os.Getenv("WIREGUARD_DISABLE_IPV6"))
+	allowReconfigure := isTruthy(os.Getenv("WIRERELAY_ALLOW_RECONFIGURE"))
 
 	maxStreams := defaultMaxConcurrentStreams
 	if raw := os.Getenv("WIRERELAY_MAX_CONCURRENT_STREAMS"); raw != "" {
@@ -86,8 +90,11 @@ func main() {
 		return
 	}
 
-	log.Printf("[WireRelay] Starting daemon (Interface: %s, gRPC: :%s, REST: :%s, MaxStreams: %d, Auth: %v)",
-		iface, grpcPort, httpPort, maxStreams, authToken != "")
+	ddns := newDDNSWatcher(iface, disableIPv6)
+	cfgMgr := newConfigManager(iface, allowReconfigure, disableIPv6, authToken != "", ddns)
+
+	log.Printf("[WireRelay] Starting daemon (Interface: %s, Configured: %v, gRPC: :%s, REST: :%s, MaxStreams: %d, Auth: %v, AllowReconfigure: %v)",
+		iface, cfgMgr.IsConfigured(), grpcPort, httpPort, maxStreams, authToken != "", allowReconfigure)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -98,26 +105,27 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		runDDNSResolver(ctx, iface, dnsInterval, disableIPv6)
+		ddns.Run(ctx, dnsInterval)
 	}()
 
 	// REST HTTP Health API
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		runRESTServer(ctx, httpPort, iface)
+		runRESTServer(ctx, httpPort, cfgMgr)
 	}()
 
 	// gRPC Relay Server
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		runGRPCServer(ctx, grpcPort, iface, authToken, maxStreams)
+		runGRPCServer(ctx, grpcPort, iface, authToken, maxStreams, cfgMgr)
 	}()
 
 	<-ctx.Done()
 	log.Println("[WireRelay] Shutdown signal received. Cleaning up...")
 	wg.Wait()
+	cfgMgr.Shutdown()
 	log.Println("[WireRelay] Stopped cleanly.")
 }
 
@@ -135,12 +143,47 @@ func isTruthy(v string) bool {
 
 // --- gRPC API Handlers ---
 
+func (s *server) Configure(ctx context.Context, req *pb.ConfigureRequest) (*pb.ConfigureResponse, error) {
+	if s.cfgMgr == nil {
+		return nil, status.Error(codes.FailedPrecondition, "config manager is not enabled")
+	}
+	appliedIface, err := s.cfgMgr.Apply(ctx, req.GetInterface(), req.GetConfig(), req.GetDisableIpv6())
+	if err != nil {
+		switch {
+		case errors.Is(err, errAuthRequiredForConfig):
+			return nil, status.Error(codes.FailedPrecondition, err.Error())
+		case errors.Is(err, errAlreadyConfigured):
+			return nil, status.Error(codes.AlreadyExists, err.Error())
+		case errors.Is(err, errInvalidConfig):
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		default:
+			return &pb.ConfigureResponse{
+				Applied:      false,
+				Interface:    req.GetInterface(),
+				ErrorMessage: err.Error(),
+			}, status.Errorf(codes.Internal, "apply wireguard config: %v", err)
+		}
+	}
+	return &pb.ConfigureResponse{
+		Applied:   true,
+		Interface: appliedIface,
+	}, nil
+}
+
 func (s *server) GetHealth(ctx context.Context, req *pb.HealthRequest) (*pb.HealthResponse, error) {
 	targetIface := req.GetInterface()
 	if targetIface == "" {
-		targetIface = s.iface
+		if s.cfgMgr != nil {
+			targetIface = s.cfgMgr.ActiveInterface()
+		} else {
+			targetIface = s.iface
+		}
 	}
 	rep := inspectWireGuardHandshake(targetIface)
+	configured := rep.state != pb.HandshakeState_HANDSHAKE_STATE_INTERFACE_ERROR
+	if s.cfgMgr != nil && s.cfgMgr.IsConfigured() {
+		configured = true
+	}
 	return &pb.HealthResponse{
 		Interface:           targetIface,
 		Status:              rep.status,
@@ -149,6 +192,7 @@ func (s *server) GetHealth(ctx context.Context, req *pb.HealthRequest) (*pb.Heal
 		HandshakeState:      rep.state,
 		ErrorMessage:        rep.errorMessage,
 		Peers:               rep.peers,
+		Configured:          configured,
 	}, nil
 }
 
@@ -342,7 +386,7 @@ func (s *server) TunnelStream(stream pb.WireRelayService_TunnelStreamServer) err
 
 // --- Server Lifecycle Setup ---
 
-func runGRPCServer(ctx context.Context, port, iface, authToken string, maxStreams int) {
+func runGRPCServer(ctx context.Context, port, iface, authToken string, maxStreams int, cfgMgr *configManager) {
 	lis, err := net.Listen("tcp", ":"+port)
 	if err != nil {
 		log.Fatalf("[WireRelay] Failed to bind gRPC port :%s: %v", port, err)
@@ -367,7 +411,7 @@ func runGRPCServer(ctx context.Context, port, iface, authToken string, maxStream
 	}
 
 	s := grpc.NewServer(opts...)
-	pb.RegisterWireRelayServiceServer(s, newRelayServer(ctx, iface, maxStreams))
+	pb.RegisterWireRelayServiceServer(s, newRelayServer(ctx, iface, maxStreams, cfgMgr))
 
 	log.Printf("[WireRelay] gRPC service ready on :%s", port)
 
@@ -391,10 +435,12 @@ func runGRPCServer(ctx context.Context, port, iface, authToken string, maxStream
 	}
 }
 
-func runRESTServer(ctx context.Context, port, iface string) {
+func runRESTServer(ctx context.Context, port string, cfgMgr *configManager) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		iface := cfgMgr.ActiveInterface()
 		rep := inspectWireGuardHandshake(iface)
+		configured := cfgMgr.IsConfigured() || rep.state != pb.HandshakeState_HANDSHAKE_STATE_INTERFACE_ERROR
 		// Set Content-Type BEFORE WriteHeader (R10)
 		w.Header().Set("Content-Type", "application/json")
 		if rep.status == pb.TunnelStatus_TUNNEL_STATUS_DISCONNECTED {
@@ -405,6 +451,7 @@ func runRESTServer(ctx context.Context, port, iface string) {
 
 		body := map[string]any{
 			"interface":             iface,
+			"configured":            configured,
 			"status":                rep.status.String(),
 			"handshake_state":       rep.state.String(),
 			"handshake_age_seconds": rep.ageSeconds,

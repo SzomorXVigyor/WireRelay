@@ -130,7 +130,7 @@ func TestTunnelStreamTargetCloseAndAuth(t *testing.T) {
 		grpc.UnaryInterceptor(unaryAuthInterceptor(token)),
 		grpc.StreamInterceptor(streamAuthInterceptor(token)),
 	)
-	pb.RegisterWireRelayServiceServer(gs, newRelayServer(shutdownCtx, "wg0", 4))
+	pb.RegisterWireRelayServiceServer(gs, newRelayServer(shutdownCtx, "wg0", 4, nil))
 	go func() { _ = gs.Serve(grpcLn) }()
 	defer gs.Stop()
 

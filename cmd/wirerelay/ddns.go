@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -19,7 +20,7 @@ type peerEndpointConfig struct {
 }
 
 // parsePeerEndpoints extracts [Peer] PublicKey + Endpoint host:port entries whose
-// host is a DNS name (non-IP literal) from a WireGuard .conf file.
+// host is a DNS name (non-IP literal) from a WireGuard .conf file or .ddns metadata file.
 func parsePeerEndpoints(confContent string) []peerEndpointConfig {
 	var peers []peerEndpointConfig
 	var current *peerEndpointConfig
@@ -75,6 +76,7 @@ func parsePeerEndpoints(confContent string) []peerEndpointConfig {
 
 func resolveConfigPath(iface string) string {
 	candidates := []string{
+		filepath.Join("/run/wireguard", iface+".ddns"),
 		filepath.Join("/run/wireguard", iface+".conf.orig"),
 		filepath.Join("/etc/wireguard", iface+".conf"),
 		filepath.Join("/run/wireguard", iface+".conf"),
@@ -102,40 +104,76 @@ func currentWGEndpoints(iface string) (map[string]string, error) {
 	return res, nil
 }
 
-// runDDNSResolver periodically re-resolves hostname WireGuard endpoints and updates
+// ddnsWatcher periodically re-resolves hostname WireGuard endpoints and updates
 // the kernel WireGuard peer via `wg set` when the resolved IP changes (R6).
-func runDDNSResolver(ctx context.Context, iface string, interval time.Duration, disableIPv6 bool) {
+// Supports both boot-time metadata files (.ddns / .conf) and live in-memory updates
+// pushed via the gRPC Configure RPC.
+type ddnsWatcher struct {
+	mu          sync.RWMutex
+	iface       string
+	peers       []peerEndpointConfig
+	disableIPv6 bool
+}
+
+func newDDNSWatcher(iface string, disableIPv6 bool) *ddnsWatcher {
+	w := &ddnsWatcher{
+		iface:       iface,
+		disableIPv6: disableIPv6,
+	}
+	if confPath := resolveConfigPath(iface); confPath != "" {
+		if raw, err := os.ReadFile(confPath); err == nil {
+			w.peers = parsePeerEndpoints(string(raw))
+		}
+	}
+	return w
+}
+
+func (w *ddnsWatcher) Update(iface string, peers []peerEndpointConfig, disableIPv6 bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if iface != "" {
+		w.iface = iface
+	}
+	w.peers = append([]peerEndpointConfig(nil), peers...)
+	w.disableIPv6 = disableIPv6
+	if len(w.peers) > 0 {
+		log.Printf("[WireRelay] DDNS endpoint watcher updated for %s (%d hostname peer(s))", w.iface, len(w.peers))
+	}
+}
+
+func (w *ddnsWatcher) snapshot() (string, []peerEndpointConfig, bool) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.iface, append([]peerEndpointConfig(nil), w.peers...), w.disableIPv6
+}
+
+func (w *ddnsWatcher) Run(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		return
 	}
-	confPath := resolveConfigPath(iface)
-	if confPath == "" {
-		return
-	}
-	raw, err := os.ReadFile(confPath)
-	if err != nil {
-		return
-	}
-	peers := parsePeerEndpoints(string(raw))
-	if len(peers) == 0 {
-		return
-	}
 
-	log.Printf("[WireRelay] DDNS endpoint watcher active for %d hostname peer(s) (interval: %s)", len(peers), interval)
+	if iface, peers, _ := w.snapshot(); len(peers) > 0 {
+		log.Printf("[WireRelay] DDNS endpoint watcher active for %s (%d hostname peer(s), interval: %s)", iface, len(peers), interval)
+	}
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-
-	network := "ip"
-	if disableIPv6 {
-		network = "ip4"
-	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			iface, peers, disableIPv6 := w.snapshot()
+			if len(peers) == 0 {
+				continue
+			}
+
+			network := "ip"
+			if disableIPv6 {
+				network = "ip4"
+			}
+
 			currentEndpoints, err := currentWGEndpoints(iface)
 			if err != nil {
 				log.Printf("[WireRelay] DDNS watcher failed to read wg endpoints: %v", err)
