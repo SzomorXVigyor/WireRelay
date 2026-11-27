@@ -18,6 +18,33 @@ service WireRelayService {
   // Configure pushes a WireGuard configuration over authenticated gRPC at startup.
   // The config is applied in-memory / container-private tmpfs and immediately shredded.
   rpc Configure (ConfigureRequest) returns (ConfigureResponse);
+
+  // GetStats returns WireGuard traffic counters and relay stream runtime statistics.
+  rpc GetStats (StatsRequest) returns (StatsResponse);
+}
+
+message StatsRequest {
+  string interface = 1; // Optional: defaults to WIRERELAY_IFACE ("wg0")
+}
+
+message PeerTransferStats {
+  string public_key = 1;
+  uint64 rx_bytes = 2;
+  uint64 tx_bytes = 3;
+}
+
+message StatsResponse {
+  string interface = 1;
+  uint64 rx_bytes = 2;               // Total WireGuard received bytes across peers
+  uint64 tx_bytes = 3;               // Total WireGuard transmitted bytes across peers
+  int64 uptime_seconds = 4;          // WireRelay daemon uptime in seconds
+  uint32 active_streams = 5;         // Currently open TunnelStream RPCs
+  uint32 max_streams = 6;            // Configured WIRERELAY_MAX_CONCURRENT_STREAMS cap
+  uint64 dial_errors_total = 7;      // Total failed target dials in TunnelStream
+  uint64 streams_rejected_total = 8; // Total TunnelStream calls rejected due to stream cap
+  repeated PeerTransferStats peers = 9;
+  int64 timestamp = 10;
+  string error_message = 11;         // Non-empty if WireGuard transfer inspection failed
 }
 
 message ConfigureRequest {

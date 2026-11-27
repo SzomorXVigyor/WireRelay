@@ -161,6 +161,33 @@ service WireRelayService {
 
   // Configure pushes a WireGuard configuration over authenticated gRPC at startup.
   rpc Configure (ConfigureRequest) returns (ConfigureResponse);
+
+  // GetStats returns WireGuard traffic counters and relay stream runtime statistics.
+  rpc GetStats (StatsRequest) returns (StatsResponse);
+}
+
+message StatsRequest {
+  string interface = 1; // Optional: defaults to WIRERELAY_IFACE ("wg0")
+}
+
+message PeerTransferStats {
+  string public_key = 1;
+  uint64 rx_bytes = 2;
+  uint64 tx_bytes = 3;
+}
+
+message StatsResponse {
+  string interface = 1;
+  uint64 rx_bytes = 2;
+  uint64 tx_bytes = 3;
+  int64 uptime_seconds = 4;
+  uint32 active_streams = 5;
+  uint32 max_streams = 6;
+  uint64 dial_errors_total = 7;
+  uint64 streams_rejected_total = 8;
+  repeated PeerTransferStats peers = 9;
+  int64 timestamp = 10;
+  string error_message = 11;
 }
 
 message ConfigureRequest {
@@ -278,9 +305,37 @@ message TunnelFrame {
 }
 ```
 
-### gRPC Endpoint
+### gRPC Endpoints
 
-`rpc GetHealth (HealthRequest) returns (HealthResponse);`
+- `rpc GetHealth (HealthRequest) returns (HealthResponse);`
+- `rpc GetStats (StatsRequest) returns (StatsResponse);`
+
+### REST Stats Endpoint
+
+`GET http://<container>:8080/stats`
+
+**Response (`200 OK`):**
+
+```json
+{
+  "interface": "wg0",
+  "rx_bytes": 1048576,
+  "tx_bytes": 524288,
+  "uptime_seconds": 3600,
+  "active_streams": 4,
+  "max_streams": 256,
+  "dial_errors_total": 0,
+  "streams_rejected_total": 0,
+  "peers": [
+    {
+      "public_key": "peer-public-key=",
+      "rx_bytes": 1048576,
+      "tx_bytes": 524288
+    }
+  ],
+  "timestamp": 1775335500
+}
+```
 
 ### Status States
 

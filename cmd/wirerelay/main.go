@@ -36,17 +36,28 @@ type server struct {
 	shutdownCtx context.Context
 	streamSem   chan struct{}
 	cfgMgr      *configManager
+	stats       *relayStats
+	transferFn  func(iface string) transferReport
 }
 
 func newRelayServer(shutdownCtx context.Context, iface string, maxStreams int, cfgMgr *configManager) *server {
+	return newRelayServerWithStats(shutdownCtx, iface, maxStreams, cfgMgr, newRelayStats(maxStreams))
+}
+
+func newRelayServerWithStats(shutdownCtx context.Context, iface string, maxStreams int, cfgMgr *configManager, stats *relayStats) *server {
 	if maxStreams < 1 {
 		maxStreams = defaultMaxConcurrentStreams
+	}
+	if stats == nil {
+		stats = newRelayStats(maxStreams)
 	}
 	return &server{
 		iface:       iface,
 		shutdownCtx: shutdownCtx,
 		streamSem:   make(chan struct{}, maxStreams),
 		cfgMgr:      cfgMgr,
+		stats:       stats,
+		transferFn:  inspectWireGuardTransfer,
 	}
 }
 
@@ -92,6 +103,7 @@ func main() {
 
 	ddns := newDDNSWatcher(iface, disableIPv6)
 	cfgMgr := newConfigManager(iface, allowReconfigure, disableIPv6, authToken != "", ddns)
+	stats := newRelayStats(maxStreams)
 
 	log.Printf("[WireRelay] Starting daemon (Interface: %s, Configured: %v, gRPC: :%s, REST: :%s, MaxStreams: %d, Auth: %v, AllowReconfigure: %v)",
 		iface, cfgMgr.IsConfigured(), grpcPort, httpPort, maxStreams, authToken != "", allowReconfigure)
@@ -108,18 +120,18 @@ func main() {
 		ddns.Run(ctx, dnsInterval)
 	}()
 
-	// REST HTTP Health API
+	// REST HTTP Health & Stats API
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		runRESTServer(ctx, httpPort, cfgMgr)
+		runRESTServer(ctx, httpPort, cfgMgr, stats)
 	}()
 
 	// gRPC Relay Server
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		runGRPCServer(ctx, grpcPort, iface, authToken, maxStreams, cfgMgr)
+		runGRPCServer(ctx, grpcPort, iface, authToken, maxStreams, cfgMgr, stats)
 	}()
 
 	<-ctx.Done()
@@ -196,6 +208,40 @@ func (s *server) GetHealth(ctx context.Context, req *pb.HealthRequest) (*pb.Heal
 	}, nil
 }
 
+func (s *server) GetStats(ctx context.Context, req *pb.StatsRequest) (*pb.StatsResponse, error) {
+	targetIface := req.GetInterface()
+	if targetIface == "" {
+		if s.cfgMgr != nil {
+			targetIface = s.cfgMgr.ActiveInterface()
+		} else {
+			targetIface = s.iface
+		}
+	}
+
+	transferFn := s.transferFn
+	if transferFn == nil {
+		transferFn = inspectWireGuardTransfer
+	}
+	rep := transferFn(targetIface)
+
+	resp := &pb.StatsResponse{
+		Interface:    targetIface,
+		RxBytes:      rep.rxBytes,
+		TxBytes:      rep.txBytes,
+		Peers:        rep.peers,
+		Timestamp:    time.Now().Unix(),
+		ErrorMessage: rep.errorMessage,
+	}
+	if s.stats != nil {
+		resp.UptimeSeconds = s.stats.UptimeSeconds()
+		resp.ActiveStreams = s.stats.ActiveStreams()
+		resp.MaxStreams = s.stats.MaxStreams()
+		resp.DialErrorsTotal = s.stats.DialErrorsTotal()
+		resp.StreamsRejectedTotal = s.stats.StreamsRejectedTotal()
+	}
+	return resp, nil
+}
+
 func (s *server) PingTarget(ctx context.Context, req *pb.PingRequest) (*pb.PingResponse, error) {
 	if req.GetTargetHost() == "" {
 		return nil, status.Error(codes.InvalidArgument, "target_host is required")
@@ -233,8 +279,19 @@ func (s *server) TunnelStream(stream pb.WireRelayService_TunnelStreamServer) err
 	// Enforce concurrent tunnel limit (R4)
 	select {
 	case s.streamSem <- struct{}{}:
-		defer func() { <-s.streamSem }()
+		if s.stats != nil {
+			s.stats.IncActiveStreams()
+		}
+		defer func() {
+			if s.stats != nil {
+				s.stats.DecActiveStreams()
+			}
+			<-s.streamSem
+		}()
 	default:
+		if s.stats != nil {
+			s.stats.IncStreamsRejected()
+		}
 		return status.Error(codes.ResourceExhausted, "maximum concurrent tunnel streams reached")
 	}
 
@@ -278,6 +335,9 @@ func (s *server) TunnelStream(stream pb.WireRelayService_TunnelStreamServer) err
 	dialCancel()
 
 	if err != nil {
+		if s.stats != nil {
+			s.stats.IncDialErrors()
+		}
 		_ = stream.Send(&pb.TunnelFrame{
 			Frame: &pb.TunnelFrame_Ack{
 				Ack: &pb.TunnelAck{Success: false, ErrorMessage: err.Error()},
@@ -386,7 +446,7 @@ func (s *server) TunnelStream(stream pb.WireRelayService_TunnelStreamServer) err
 
 // --- Server Lifecycle Setup ---
 
-func runGRPCServer(ctx context.Context, port, iface, authToken string, maxStreams int, cfgMgr *configManager) {
+func runGRPCServer(ctx context.Context, port, iface, authToken string, maxStreams int, cfgMgr *configManager, stats *relayStats) {
 	lis, err := net.Listen("tcp", ":"+port)
 	if err != nil {
 		log.Fatalf("[WireRelay] Failed to bind gRPC port :%s: %v", port, err)
@@ -411,7 +471,7 @@ func runGRPCServer(ctx context.Context, port, iface, authToken string, maxStream
 	}
 
 	s := grpc.NewServer(opts...)
-	pb.RegisterWireRelayServiceServer(s, newRelayServer(ctx, iface, maxStreams, cfgMgr))
+	pb.RegisterWireRelayServiceServer(s, newRelayServerWithStats(ctx, iface, maxStreams, cfgMgr, stats))
 
 	log.Printf("[WireRelay] gRPC service ready on :%s", port)
 
@@ -435,12 +495,20 @@ func runGRPCServer(ctx context.Context, port, iface, authToken string, maxStream
 	}
 }
 
-func runRESTServer(ctx context.Context, port string, cfgMgr *configManager) {
+func newRESTMux(cfgMgr *configManager, stats *relayStats, transferFn func(string) transferReport) *http.ServeMux {
+	if transferFn == nil {
+		transferFn = inspectWireGuardTransfer
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		iface := cfgMgr.ActiveInterface()
+		iface := "wg0"
+		configured := false
+		if cfgMgr != nil {
+			iface = cfgMgr.ActiveInterface()
+			configured = cfgMgr.IsConfigured()
+		}
 		rep := inspectWireGuardHandshake(iface)
-		configured := cfgMgr.IsConfigured() || rep.state != pb.HandshakeState_HANDSHAKE_STATE_INTERFACE_ERROR
+		configured = configured || rep.state != pb.HandshakeState_HANDSHAKE_STATE_INTERFACE_ERROR
 		// Set Content-Type BEFORE WriteHeader (R10)
 		w.Header().Set("Content-Type", "application/json")
 		if rep.status == pb.TunnelStatus_TUNNEL_STATUS_DISCONNECTED {
@@ -474,10 +542,60 @@ func runRESTServer(ctx context.Context, port string, cfgMgr *configManager) {
 		_ = json.NewEncoder(w).Encode(body)
 	})
 
+	mux.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
+		iface := "wg0"
+		if cfgMgr != nil {
+			iface = cfgMgr.ActiveInterface()
+		}
+		rep := transferFn(iface)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+
+		body := map[string]any{
+			"interface":              iface,
+			"rx_bytes":               rep.rxBytes,
+			"tx_bytes":               rep.txBytes,
+			"uptime_seconds":         int64(0),
+			"active_streams":         uint32(0),
+			"max_streams":            uint32(0),
+			"dial_errors_total":      uint64(0),
+			"streams_rejected_total": uint64(0),
+			"timestamp":              time.Now().Unix(),
+		}
+		if stats != nil {
+			body["uptime_seconds"] = stats.UptimeSeconds()
+			body["active_streams"] = stats.ActiveStreams()
+			body["max_streams"] = stats.MaxStreams()
+			body["dial_errors_total"] = stats.DialErrorsTotal()
+			body["streams_rejected_total"] = stats.StreamsRejectedTotal()
+		}
+		if rep.errorMessage != "" {
+			body["error_message"] = rep.errorMessage
+		}
+		if len(rep.peers) > 0 {
+			peers := make([]map[string]any, 0, len(rep.peers))
+			for _, p := range rep.peers {
+				peers = append(peers, map[string]any{
+					"public_key": p.PublicKey,
+					"rx_bytes":   p.RxBytes,
+					"tx_bytes":   p.TxBytes,
+				})
+			}
+			body["peers"] = peers
+		}
+		_ = json.NewEncoder(w).Encode(body)
+	})
+
+	return mux
+}
+
+func runRESTServer(ctx context.Context, port string, cfgMgr *configManager, stats *relayStats) {
+	mux := newRESTMux(cfgMgr, stats, inspectWireGuardTransfer)
 	srv := &http.Server{Addr: ":" + port, Handler: mux}
 
 	go func() {
-		log.Printf("[WireRelay] REST Health API ready on :%s/health", port)
+		log.Printf("[WireRelay] REST API ready on :%s (/health, /stats)", port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("[WireRelay] REST server error: %v", err)
 		}
